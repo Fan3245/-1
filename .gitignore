@@ -1,52 +1,724 @@
-# Prerequisites
-*.d
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
 
-# Object files
-*.o
-*.ko
-*.obj
-*.elf
+#define ALPHABET_SIZE 26
+#define MAX_TEXT_LEN 4096
+#define MAX_WORD_LEN 32
+#define DICT_SIZE 100  // 增加字典大小
+#define MAX_INPUT 256
+#define BIGRAMS_SIZE 676  // 26*26 所有可能的双字母组合
+#define TRIGRAMS_SIZE 17576  // 26*26*26 所有可能的三字母组合
 
-# Linker output
-*.ilk
-*.map
-*.exp
+// 英文常用字母频率顺序（从高到低）
+const char freq_order[ALPHABET_SIZE + 1] = "ETAOINSHRDLCUMWFGYPBVKJXQZ";
 
-# Precompiled Headers
-*.gch
-*.pch
+// 英文常用双字母组合频率顺序（从高到低）
+const char *common_bigrams[] = {
+    "TH", "HE", "IN", "ER", "AN", "RE", "ON", "AT", "EN", "ND",
+    "TI", "ES", "OR", "TE", "OF", "ED", "IS", "IT", "AL", "AR",
+    "ST", "TO", "NT", "NG", "SE", "HA", "AS", "OU", "IO", "LE",
+    "VE", "CO", "ME", "DE", "HI", "RI", "RO", "IC", "NE", "EA",
+    "CH", "LA", "CE", "NS", "DI", "FO", "HO", "PE", "BE", "EL"
+};
 
-# Libraries
-*.lib
-*.a
-*.la
-*.lo
+// 英文常用三字母组合频率顺序（从高到低）
+const char *common_trigrams[] = {
+    "THE", "AND", "THA", "ENT", "ING", "FOR", "NDE", "HAS", "NCE",
+    "EDT", "TIS", "OFT", "STH", "MEN", "TIO", "VER", "ALL", "WIT",
+    "THI", "TAT", "ERE", "CON", "EVE", "EVE", "EVE", "EVE", "EVE"
+};
 
-# Shared objects (inc. Windows DLLs)
-*.dll
-*.so
-*.so.*
-*.dylib
+// 扩展常用英文单词字典
+const char *dictionary[DICT_SIZE] = {
+    // 最常用词
+    "THE", "AND", "THAT", "HAVE", "FOR", "NOT", "WITH", "YOU", "THIS", "BUT",
+    // 常用动词
+    "WAS", "ARE", "WERE", "BEEN", "WILL", "WOULD", "SHOULD", "COULD", "MUST", "MAY",
+    // 常用代词
+    "HIS", "HER", "THEIR", "OUR", "YOUR", "MY", "ITS", "HIM", "HE", "SHE",
+    // 常用介词和连词
+    "FROM", "INTO", "UPON", "ABOUT", "BETWEEN", "AMONG", "THROUGH", "DURING", "BEFORE", "AFTER",
+    // 常用形容词
+    "GOOD", "GREAT", "LONG", "LITTLE", "NEW", "OLD", "HIGH", "LOW", "BIG", "SMALL",
+    // 常用副词
+    "VERY", "MORE", "MOST", "WELL", "MUCH", "MANY", "ALSO", "STILL", "AGAIN", "ONCE",
+    // 常用短语
+    "IN THE", "TO THE", "OF THE", "AND THE", "THAT THE", "WITH THE", "FOR THE", "ON THE", "IN A", "TO A",
+    // 常用动词短语
+    "HAVE BEEN", "WILL BE", "WOULD BE", "SHOULD BE", "COULD BE", "MUST BE", "MAY BE", "HAS BEEN", "HAD BEEN", "WILL HAVE",
+    // 常用介词短语
+    "IN ORDER", "IN FACT", "IN CASE", "IN TIME", "IN PLACE", "IN PART", "IN VIEW", "IN TERMS", "IN LINE", "IN HAND",
+    // 常用连词短语
+    "AS WELL", "AS LONG", "AS SOON", "AS MUCH", "AS MANY", "AS FAR", "AS GOOD", "AS BAD", "AS HIGH", "AS LOW"
+};
 
-# Executables
-*.exe
-*.out
-*.app
-*.i*86
-*.x86_64
-*.hex
+// ================= 工具函数 =================
+void to_uppercase(char *s) {
+    for (; *s; ++s) *s = toupper(*s);
+}
 
-# Debug files
-*.dSYM/
-*.su
-*.idb
-*.pdb
+void strip_newline(char *s) {
+    size_t len = strlen(s);
+    if (len > 0 && s[len-1] == '\n') s[len-1] = '\0';
+}
 
-# Kernel Module Compile Results
-*.mod*
-*.cmd
-.tmp_versions/
-modules.order
-Module.symvers
-Mkfile.old
-dkms.conf
+// ================= 密钥相关 =================
+void init_key(char key[ALPHABET_SIZE]) {
+    for (int i = 0; i < ALPHABET_SIZE; ++i) key[i] = 'A' + i;
+}
+
+void invert_key(const char key[ALPHABET_SIZE], char inv_key[ALPHABET_SIZE]) {
+    for (int i = 0; i < ALPHABET_SIZE; ++i) {
+        inv_key[key[i] - 'A'] = 'A' + i;
+    }
+}
+
+void print_key(const char key[ALPHABET_SIZE]) {
+    printf("密钥映射: ");
+    for (int i = 0; i < ALPHABET_SIZE; ++i) {
+        printf("%c=%c ", 'A'+i, key[i]);
+    }
+    printf("\n");
+}
+
+// ================= 改进的密钥修改 =================
+void smart_update_key(char key[ALPHABET_SIZE], const char *input) {
+    char buf[MAX_INPUT];
+    strncpy(buf, input, MAX_INPUT-1);
+    buf[MAX_INPUT-1] = '\0';
+    char *token = strtok(buf, ",");
+    
+    // 记录已使用的映射
+    int used[ALPHABET_SIZE] = {0};
+    for (int i = 0; i < ALPHABET_SIZE; ++i) {
+        used[i] = key[i] - 'A';
+    }
+    
+    // 处理每个映射
+    while (token) {
+        char from, to;
+        if (sscanf(token, "%c=%c", &from, &to) == 2) {
+            from = toupper(from);
+            to = toupper(to);
+            if (from >= 'A' && from <= 'Z' && to >= 'A' && to <= 'Z') {
+                // 检查目标字母是否已被使用
+                int target_idx = to - 'A';
+                if (used[target_idx] != (from - 'A')) {
+                    // 如果目标字母已被使用，交换映射
+                    for (int i = 0; i < ALPHABET_SIZE; ++i) {
+                        if (key[i] == to) {
+                            key[i] = key[from - 'A'];
+                            used[i] = from - 'A';
+                            break;
+                        }
+                    }
+                }
+                // 更新映射
+                key[from - 'A'] = to;
+                used[from - 'A'] = target_idx;
+            }
+        }
+        token = strtok(NULL, ",");
+    }
+}
+
+// ================= 改进的加密/解密 =================
+void encrypt(const char *plain, const char key[ALPHABET_SIZE], char *cipher) {
+    int j = 0;
+    for (int i = 0; plain[i]; ++i) {
+        char c = toupper(plain[i]);
+        if (c >= 'A' && c <= 'Z') {
+            cipher[j++] = key[c - 'A'];
+        } else if (c == ' ' || c == ',' || c == '.') {
+            cipher[j++] = c;
+        }
+    }
+    cipher[j] = '\0';
+}
+
+void decrypt(const char *cipher, const char key[ALPHABET_SIZE], char *plain) {
+    char inv_key[ALPHABET_SIZE];
+    invert_key(key, inv_key);
+    int j = 0;
+    for (int i = 0; cipher[i]; ++i) {
+        char c = toupper(cipher[i]);
+        if (c >= 'A' && c <= 'Z') {
+            plain[j++] = inv_key[c - 'A'];
+        } else if (c == ' ' || c == ',' || c == '.') {
+            plain[j++] = c;
+        }
+    }
+    plain[j] = '\0';
+}
+
+// ================= 频率分析 =================
+void analyze_frequency(const char *text, int freq[ALPHABET_SIZE]) {
+    for (int i = 0; i < ALPHABET_SIZE; ++i) freq[i] = 0;
+    for (int i = 0; text[i]; ++i) {
+        char c = toupper(text[i]);
+        if (c >= 'A' && c <= 'Z') freq[c - 'A']++;
+    }
+}
+
+void sort_by_frequency(const int freq[ALPHABET_SIZE], int order[ALPHABET_SIZE]) {
+    for (int i = 0; i < ALPHABET_SIZE; ++i) order[i] = i;
+    for (int i = 0; i < ALPHABET_SIZE-1; ++i) {
+        for (int j = i+1; j < ALPHABET_SIZE; ++j) {
+            if (freq[order[j]] > freq[order[i]]) {
+                int tmp = order[i]; order[i] = order[j]; order[j] = tmp;
+            }
+        }
+    }
+}
+
+void print_frequency_table(const int freq[ALPHABET_SIZE]) {
+    printf("密文字母频率统计:\n");
+    for (int i = 0; i < ALPHABET_SIZE; ++i) {
+        printf("%c:%4d  ", 'A'+i, freq[i]);
+        if ((i+1)%6 == 0) printf("\n");
+    }
+    printf("\n");
+}
+
+// ================= 改进的双字母分析 =================
+void analyze_bigrams(const char *text, int bigram_count[BIGRAMS_SIZE]) {
+    for (int i = 0; i < BIGRAMS_SIZE; ++i) bigram_count[i] = 0;
+    for (int i = 0; text[i+1]; ++i) {
+        char a = toupper(text[i]);
+        char b = toupper(text[i+1]);
+        if (a < 'A' || a > 'Z' || b < 'A' || b > 'Z') continue;
+        int idx = (a - 'A') * 26 + (b - 'A');
+        bigram_count[idx]++;
+    }
+}
+
+void print_bigrams_table(const int bigram_count[BIGRAMS_SIZE]) {
+    printf("密文中最常见的双字母组合:\n");
+    int top_bigrams[20][2] = {0};  // [count, index]
+    
+    // 找出出现次数最多的20个双字母组合
+    for (int i = 0; i < BIGRAMS_SIZE; ++i) {
+        for (int j = 0; j < 20; ++j) {
+            if (bigram_count[i] > top_bigrams[j][0]) {
+                // 移动其他元素
+                for (int k = 19; k > j; --k) {
+                    top_bigrams[k][0] = top_bigrams[k-1][0];
+                    top_bigrams[k][1] = top_bigrams[k-1][1];
+                }
+                top_bigrams[j][0] = bigram_count[i];
+                top_bigrams[j][1] = i;
+                break;
+            }
+        }
+    }
+    
+    // 打印结果
+    for (int i = 0; i < 20; ++i) {
+        if (top_bigrams[i][0] > 0) {
+            int idx = top_bigrams[i][1];
+            char a = 'A' + idx / 26;
+            char b = 'A' + idx % 26;
+            printf("%c%c:%3d  ", a, b, top_bigrams[i][0]);
+            if ((i+1)%5 == 0) printf("\n");
+        }
+    }
+    printf("\n");
+}
+
+// ================= 改进的三字母分析 =================
+void analyze_trigrams(const char *text, int trigram_count[TRIGRAMS_SIZE]) {
+    for (int i = 0; i < TRIGRAMS_SIZE; ++i) trigram_count[i] = 0;
+    for (int i = 0; text[i+2]; ++i) {
+        char a = toupper(text[i]);
+        char b = toupper(text[i+1]);
+        char c = toupper(text[i+2]);
+        if (a < 'A' || a > 'Z' || b < 'A' || b > 'Z' || c < 'A' || c > 'Z') continue;
+        int idx = ((a - 'A') * 26 + (b - 'A')) * 26 + (c - 'A');
+        trigram_count[idx]++;
+    }
+}
+
+void print_trigrams_table(const int trigram_count[TRIGRAMS_SIZE]) {
+    printf("密文中最常见的三字母组合:\n");
+    int top_trigrams[20][2] = {0};  // [count, index]
+    
+    // 找出出现次数最多的20个三字母组合
+    for (int i = 0; i < TRIGRAMS_SIZE; ++i) {
+        for (int j = 0; j < 20; ++j) {
+            if (trigram_count[i] > top_trigrams[j][0]) {
+                // 移动其他元素
+                for (int k = 19; k > j; --k) {
+                    top_trigrams[k][0] = top_trigrams[k-1][0];
+                    top_trigrams[k][1] = top_trigrams[k-1][1];
+                }
+                top_trigrams[j][0] = trigram_count[i];
+                top_trigrams[j][1] = i;
+                break;
+            }
+        }
+    }
+    
+    // 打印结果
+    for (int i = 0; i < 20; ++i) {
+        if (top_trigrams[i][0] > 0) {
+            int idx = top_trigrams[i][1];
+            char a = 'A' + (idx / 676);
+            char b = 'A' + ((idx / 26) % 26);
+            char c = 'A' + (idx % 26);
+            printf("%c%c%c:%3d  ", a, b, c, top_trigrams[i][0]);
+            if ((i+1)%5 == 0) printf("\n");
+        }
+    }
+    printf("\n");
+}
+
+// ================= 改进的建议映射 =================
+void suggest_key_by_frequency(const char *cipher, char key[ALPHABET_SIZE]) {
+    int freq[ALPHABET_SIZE];
+    int order[ALPHABET_SIZE];
+    analyze_frequency(cipher, freq);
+    sort_by_frequency(freq, order);
+    
+    // 基于频率的初步映射
+    for (int i = 0; i < ALPHABET_SIZE; ++i) {
+        key[order[i]] = freq_order[i];
+    }
+    
+    // 基于双字母组合的调整
+    int bigram_count[BIGRAMS_SIZE];
+    analyze_bigrams(cipher, bigram_count);
+    
+    // 找出密文中最常见的双字母组合
+    int max_bigram = 0;
+    for (int i = 1; i < BIGRAMS_SIZE; ++i) {
+        if (bigram_count[i] > bigram_count[max_bigram]) {
+            max_bigram = i;
+        }
+    }
+    
+    // 如果发现明显的双字母组合模式，调整映射
+    if (bigram_count[max_bigram] > 5) {  // 设置一个阈值
+        char first = 'A' + (max_bigram / 26);
+        char second = 'A' + (max_bigram % 26);
+        
+        // 尝试将最常见的双字母组合映射为常见英文双字母组合
+        for (int i = 0; i < 10; ++i) {  // 检查前10个最常见的英文双字母组合
+            if (strcmp(common_bigrams[i], "TH") == 0) {
+                key[first - 'A'] = 'T';
+                key[second - 'A'] = 'H';
+                break;
+            } else if (strcmp(common_bigrams[i], "HE") == 0) {
+                key[first - 'A'] = 'H';
+                key[second - 'A'] = 'E';
+                break;
+            }
+        }
+    }
+    
+    // 基于三字母组合的调整
+    int trigram_count[TRIGRAMS_SIZE];
+    analyze_trigrams(cipher, trigram_count);
+    
+    // 找出密文中最常见的三字母组合
+    int max_trigram = 0;
+    for (int i = 1; i < TRIGRAMS_SIZE; ++i) {
+        if (trigram_count[i] > trigram_count[max_trigram]) {
+            max_trigram = i;
+        }
+    }
+    
+    // 如果发现明显的三字母组合模式，调整映射
+    if (trigram_count[max_trigram] > 3) {  // 设置一个阈值
+        char first = 'A' + (max_trigram / 676);
+        char second = 'A' + ((max_trigram / 26) % 26);
+        char third = 'A' + (max_trigram % 26);
+        
+        // 尝试将最常见的三字母组合映射为"THE"
+        if (trigram_count[max_trigram] > 5) {
+            key[first - 'A'] = 'T';
+            key[second - 'A'] = 'H';
+            key[third - 'A'] = 'E';
+        }
+    }
+}
+
+// ================= 改进的密钥建议分析 =================
+void analyze_key_suggestions(const char *cipher, const char *plain, const char key[ALPHABET_SIZE], char suggestions[MAX_INPUT]) {
+    suggestions[0] = '\0';
+    char temp[MAX_INPUT] = "";
+    int used_mappings[ALPHABET_SIZE] = {0};  // 记录已使用的映射
+    int confidence[ALPHABET_SIZE] = {0};     // 记录每个映射的置信度
+    
+    // 分析已识别的单词
+    char buf[MAX_TEXT_LEN];
+    strncpy(buf, plain, MAX_TEXT_LEN-1);
+    buf[MAX_TEXT_LEN-1] = '\0';
+    to_uppercase(buf);
+    
+    // 检查每个单词
+    char *p = buf, *start = buf;
+    while (*p) {
+        if (!isalpha(*p)) {
+            if (p > start) {
+                *p = '\0';
+                // 检查是否在字典中
+                for (int i = 0; i < DICT_SIZE; ++i) {
+                    if (strcmp(start, dictionary[i]) == 0) {
+                        // 找到匹配的单词，分析其字母映射
+                        for (int j = 0; start[j]; ++j) {
+                            char plain_char = start[j];
+                            // 找到对应的密文字符
+                            for (int k = 0; k < ALPHABET_SIZE; ++k) {
+                                if (key[k] == plain_char) {
+                                    char cipher_char = 'A' + k;
+                                    if (!used_mappings[cipher_char - 'A']) {
+                                        confidence[cipher_char - 'A'] += 3;  // 已识别单词的映射给予较高置信度
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+            start = p+1;
+        }
+        p++;
+    }
+    
+    // 分析三字母组合（优先分析"THE"）
+    int trigram_count[TRIGRAMS_SIZE];
+    analyze_trigrams(cipher, trigram_count);
+    
+    // 找出最常见的三字母组合
+    int max_trigram = 0;
+    for (int i = 1; i < TRIGRAMS_SIZE; ++i) {
+        if (trigram_count[i] > trigram_count[max_trigram]) {
+            max_trigram = i;
+        }
+    }
+    
+    // 如果发现明显的"THE"模式，给予最高置信度
+    if (trigram_count[max_trigram] > 3) {
+        char first = 'A' + (max_trigram / 676);
+        char second = 'A' + ((max_trigram / 26) % 26);
+        char third = 'A' + (max_trigram % 26);
+        
+        confidence[first - 'A'] += 5;   // T
+        confidence[second - 'A'] += 5;  // H
+        confidence[third - 'A'] += 5;   // E
+    }
+    
+    // 分析双字母组合
+    int bigram_count[BIGRAMS_SIZE];
+    analyze_bigrams(cipher, bigram_count);
+    
+    // 找出最常见的双字母组合
+    int max_bigram = 0;
+    for (int i = 1; i < BIGRAMS_SIZE; ++i) {
+        if (bigram_count[i] > bigram_count[max_bigram]) {
+            max_bigram = i;
+        }
+    }
+    
+    // 如果发现明显的双字母组合模式，给予较高置信度
+    if (bigram_count[max_bigram] > 5) {
+        char first = 'A' + (max_bigram / 26);
+        char second = 'A' + (max_bigram % 26);
+        
+        confidence[first - 'A'] += 4;
+        confidence[second - 'A'] += 4;
+    }
+    
+    // 分析重复模式
+    int pattern_count[ALPHABET_SIZE] = {0};
+    for (int i = 0; cipher[i]; ++i) {
+        if (cipher[i] >= 'A' && cipher[i] <= 'Z') {
+            pattern_count[cipher[i] - 'A']++;
+        }
+    }
+    
+    // 根据重复频率调整置信度
+    for (int i = 0; i < ALPHABET_SIZE; ++i) {
+        if (pattern_count[i] > 10) {  // 如果某个字母出现次数超过10次
+            confidence[i] += 2;
+        }
+    }
+    
+    // 存储前三个最优的映射建议
+    struct {
+        int confidence;
+        int mapping;
+        char plain;
+    } top_three[3] = {{0, -1, ' '}, {0, -1, ' '}, {0, -1, ' '}};
+    
+    // 找出置信度最高的三个映射
+    for (int i = 0; i < ALPHABET_SIZE; ++i) {
+        if (confidence[i] > 0 && !used_mappings[i]) {
+            // 确定最可能的明文字母
+            char best_plain = ' ';
+            if (confidence[i] >= 5) {  // 非常高的置信度
+                if (i == (max_trigram / 676)) {
+                    best_plain = 'T';
+                } else if (i == ((max_trigram / 26) % 26)) {
+                    best_plain = 'H';
+                } else if (i == (max_trigram % 26)) {
+                    best_plain = 'E';
+                } else if (pattern_count[i] > 10) {  // 高频重复字母
+                    best_plain = 'E';  // 假设是E
+                }
+            }
+            
+            if (best_plain != ' ') {
+                // 更新前三个最优建议
+                for (int j = 0; j < 3; ++j) {
+                    if (confidence[i] > top_three[j].confidence) {
+                        // 移动其他元素
+                        for (int k = 2; k > j; --k) {
+                            top_three[k] = top_three[k-1];
+                        }
+                        top_three[j].confidence = confidence[i];
+                        top_three[j].mapping = i;
+                        top_three[j].plain = best_plain;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    
+    // 生成建议字符串
+    suggestions[0] = '\0';
+    for (int i = 0; i < 3; ++i) {
+        if (top_three[i].confidence >= 3) {  // 只包含置信度大于等于3的建议
+            char temp[10];
+            sprintf(temp, "%c=%c", top_three[i].plain, 'A' + top_three[i].mapping);
+            if (i > 0) strcat(suggestions, ",");
+            strcat(suggestions, temp);
+        }
+    }
+    
+    // 如果没有找到任何建议，返回空字符串
+    if (strlen(suggestions) == 0) {
+        suggestions[0] = '\0';
+    }
+}
+
+// ================= 上下文分析 =================
+int count_and_highlight_dict_words(const char *text) {
+    int count = 0;
+    char buf[MAX_TEXT_LEN];
+    strncpy(buf, text, MAX_TEXT_LEN-1);
+    buf[MAX_TEXT_LEN-1] = '\0';
+    to_uppercase(buf);
+    char *tokens[MAX_TEXT_LEN/2];
+    int token_pos[MAX_TEXT_LEN/2];
+    int token_len[MAX_TEXT_LEN/2];
+    int token_count = 0;
+    char *p = buf, *start = buf;
+    int idx = 0;
+    while (*p) {
+        if (!isalpha(*p)) {
+            if (p > start) {
+                tokens[token_count] = start;
+                token_pos[token_count] = start - buf;
+                token_len[token_count] = p - start;
+                token_count++;
+            }
+            start = p+1;
+        }
+        p++;
+    }
+    if (p > start) {
+        tokens[token_count] = start;
+        token_pos[token_count] = start - buf;
+        token_len[token_count] = p - start;
+        token_count++;
+    }
+    int highlight[MAX_TEXT_LEN] = {0};
+    for (int i = 0; i < token_count; ++i) {
+        for (int j = 0; j < DICT_SIZE; ++j) {
+            if (token_len[i] == (int)strlen(dictionary[j]) &&
+                strncmp(tokens[i], dictionary[j], token_len[i]) == 0) {
+                count++;
+                for (int k = 0; k < token_len[i]; ++k)
+                    highlight[token_pos[i]+k] = 1;
+                break;
+            }
+        }
+    }
+    // 输出高亮文本
+    printf("当前破译结果(已识别单词大写显示):\n");
+    for (int i = 0; text[i]; ++i) {
+        if (highlight[i])
+            printf("\033[1;32m%c\033[0m", toupper(text[i])); // 绿色高亮
+        else
+            printf("%c", text[i]);
+    }
+    printf("\n");
+    return count;
+}
+
+// ================= 改进的交互式破译 =================
+void interactive_attack(const char *cipher) {
+    char key[ALPHABET_SIZE];
+    char plain[MAX_TEXT_LEN];
+    char input[MAX_INPUT];
+    char suggestions[MAX_INPUT];
+    int round = 1;
+    int last_dict_count = 0;  // 记录上一轮识别的单词数
+    
+    // 初始建议密钥
+    suggest_key_by_frequency(cipher, key);
+    
+    while (1) {
+        printf("\n===== 破译第%d轮 =====\n", round);
+        print_key(key);
+
+        // 频率分析
+        int freq[ALPHABET_SIZE];
+        analyze_frequency(cipher, freq);
+        print_frequency_table(freq);
+
+        // 双字母分析
+        int bigram_count[BIGRAMS_SIZE];
+        analyze_bigrams(cipher, bigram_count);
+        print_bigrams_table(bigram_count);
+
+        // 三字母分析
+        int trigram_count[TRIGRAMS_SIZE];
+        analyze_trigrams(cipher, trigram_count);
+        print_trigrams_table(trigram_count);
+
+        // 破译结果与单词高亮
+        decrypt(cipher, key, plain);
+        int dict_count = count_and_highlight_dict_words(plain);
+        printf("已识别常用英文单词数: %d\n", dict_count);
+        
+        // 显示识别单词数的变化
+        if (round > 1) {
+            int diff = dict_count - last_dict_count;
+            if (diff > 0) {
+                printf("新增识别单词数: +%d\n", diff);
+            } else if (diff < 0) {
+                printf("减少识别单词数: %d\n", diff);
+            }
+        }
+        last_dict_count = dict_count;
+
+        // 分析并显示密钥修改建议
+        analyze_key_suggestions(cipher, plain, key, suggestions);
+        if (strlen(suggestions) > 0) {
+            printf("\n建议的密钥修改(按置信度排序):\n");
+            char *token = strtok(suggestions, ",");
+            int suggestion_num = 1;
+            while (token) {
+                printf("%d. %s\n", suggestion_num++, token);
+                token = strtok(NULL, ",");
+            }
+        }
+
+        // 显示可能的单词建议
+        printf("\n可能的单词建议:\n");
+        for (int i = 0; i < DICT_SIZE; ++i) {
+            int match = 0;
+            for (int j = 0; plain[j]; ++j) {
+                if (strncmp(plain + j, dictionary[i], strlen(dictionary[i])) == 0) {
+                    match = 1;
+                    break;
+                }
+            }
+            if (!match) {
+                printf("%s ", dictionary[i]);
+            }
+        }
+        printf("\n");
+
+        printf("输入你想指定的密钥映射(如T=A,H=B,...), 或直接回车使用建议，或输入exit退出:\n> ");
+        if (!fgets(input, sizeof(input), stdin)) break;
+        strip_newline(input);
+        to_uppercase(input);
+        if (strcmp(input, "EXIT") == 0) break;
+        
+        if (strlen(input) > 0) {
+            // 使用用户输入的映射
+            smart_update_key(key, input);
+        } else if (strlen(suggestions) > 0) {
+            // 使用建议的映射
+            smart_update_key(key, suggestions);
+        } else {
+            // 如果没有具体建议，则基于频率建议未指定部分
+            char freq_key[ALPHABET_SIZE];
+            suggest_key_by_frequency(cipher, freq_key);
+            for (int i = 0; i < ALPHABET_SIZE; ++i) {
+                // 只更新未被用户指定的部分
+                if (key[i] == ('A'+i)) key[i] = freq_key[i];
+            }
+        }
+        round++;
+    }
+}
+
+// ================= 主程序 =================
+int main() {
+    char input[MAX_INPUT];
+    char text[MAX_TEXT_LEN];
+    char key[ALPHABET_SIZE];
+    char result[MAX_TEXT_LEN];
+    printf("==============================\n");
+    printf(" 单表代换辅助工具 (命令行版)\n");
+    printf("==============================\n");
+    while (1) {
+        printf("\n1. 加密\n2. 解密\n3. 辅助破译(唯密文攻击)\n0. 退出\n请选择功能: ");
+        if (!fgets(input, sizeof(input), stdin)) break;
+        strip_newline(input);
+        if (strcmp(input, "1") == 0) {
+            printf("请输入明文:\n> ");
+            if (!fgets(text, sizeof(text), stdin)) continue;
+            strip_newline(text);
+            to_uppercase(text);
+            printf("请输入26字母密钥(如QWERTYUIOPASDFGHJKLZXCVBNM):\n> ");
+            if (!fgets(input, sizeof(input), stdin)) continue;
+            strip_newline(input);
+            to_uppercase(input);
+            if (strlen(input) != ALPHABET_SIZE) {
+                printf("密钥长度必须为26!\n");
+                continue;
+            }
+            for (int i = 0; i < ALPHABET_SIZE; ++i) key[i] = input[i];
+            encrypt(text, key, result);
+            printf("加密结果:\n%s\n", result);
+        } else if (strcmp(input, "2") == 0) {
+            printf("请输入密文:\n> ");
+            if (!fgets(text, sizeof(text), stdin)) continue;
+            strip_newline(text);
+            to_uppercase(text);
+            printf("请输入26字母密钥(如QWERTYUIOPASDFGHJKLZXCVBNM):\n> ");
+            if (!fgets(input, sizeof(input), stdin)) continue;
+            strip_newline(input);
+            to_uppercase(input);
+            if (strlen(input) != ALPHABET_SIZE) {
+                printf("密钥长度必须为26!\n");
+                continue;
+            }
+            for (int i = 0; i < ALPHABET_SIZE; ++i) key[i] = input[i];
+            decrypt(text, key, result);
+            printf("解密结果:\n%s\n", result);
+        } else if (strcmp(input, "3") == 0) {
+            printf("请输入密文(仅支持英文大写字母):\n> ");
+            if (!fgets(text, sizeof(text), stdin)) continue;
+            strip_newline(text);
+            to_uppercase(text);
+            interactive_attack(text);
+        } else if (strcmp(input, "0") == 0) {
+            printf("感谢使用，再见！\n");
+            break;
+        } else {
+            printf("无效选项，请重新输入。\n");
+        }
+    }
+    return 0;
+}
